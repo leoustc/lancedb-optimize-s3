@@ -99,6 +99,27 @@ impl Connection {
         self.inner.take();
     }
 
+    #[pyo3(signature = ())]
+    pub fn s3_cache_pull(self_: PyRef<'_, Self>) -> PyResult<Bound<'_, PyAny>> {
+        let inner = self_.get_inner()?.clone();
+        future_into_py(self_.py(), async move {
+            inner.s3_cache_pull().await.infer_error()
+        })
+    }
+
+    #[pyo3(signature = ())]
+    pub fn s3_cache_commit(self_: PyRef<'_, Self>) -> PyResult<Bound<'_, PyAny>> {
+        let inner = self_.get_inner()?.clone();
+        future_into_py(self_.py(), async move {
+            inner.s3_cache_commit().await.infer_error()
+        })
+    }
+
+    #[pyo3(signature = ())]
+    pub fn s3_cache_close(&self) -> PyResult<()> {
+        self.get_inner()?.s3_cache_close().infer_error()
+    }
+
     #[getter]
     pub fn uri(&self) -> PyResult<String> {
         self.get_inner().map(|inner| inner.uri().to_string())

@@ -405,6 +405,44 @@ impl Connection {
         &self.internal
     }
 
+    /// Pull remote object-store contents into the local write-back cache.
+    pub async fn s3_cache_pull(&self) -> Result<()> {
+        self.internal
+            .as_any()
+            .downcast_ref::<ListingDatabase>()
+            .ok_or_else(|| Error::NotSupported {
+                message: "S3/object-store local cache is only supported for local LanceDB connections"
+                    .to_string(),
+            })?
+            .s3_cache_pull()
+            .await
+    }
+
+    /// Commit local write-back cache changes to the backing object store.
+    pub async fn s3_cache_commit(&self) -> Result<()> {
+        self.internal
+            .as_any()
+            .downcast_ref::<ListingDatabase>()
+            .ok_or_else(|| Error::NotSupported {
+                message: "S3/object-store local cache is only supported for local LanceDB connections"
+                    .to_string(),
+            })?
+            .s3_cache_commit()
+            .await
+    }
+
+    /// Close the local write-back cache for this connection.
+    pub fn s3_cache_close(&self) -> Result<()> {
+        self.internal
+            .as_any()
+            .downcast_ref::<ListingDatabase>()
+            .ok_or_else(|| Error::NotSupported {
+                message: "S3/object-store local cache is only supported for local LanceDB connections"
+                    .to_string(),
+            })?
+            .s3_cache_close()
+    }
+
     /// Get the names of all tables in the database
     ///
     /// The names will be returned in lexicographical order (ascending)

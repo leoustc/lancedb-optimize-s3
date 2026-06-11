@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 use std::fs::create_dir_all;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{collections::HashMap, sync::Arc};
 
 use lance::dataset::refs::Ref;
@@ -22,7 +22,10 @@ use crate::connection::ConnectRequest;
 use crate::database::ReadConsistency;
 use crate::database::namespace::LanceNamespaceDatabase;
 use crate::error::{CreateDirSnafu, Error, Result};
-use crate::io::object_store::MirroringObjectStoreWrapper;
+use crate::io::object_store::{
+    LOCAL_CACHE_DIR_OPTION, LocalCacheObjectStore, LocalCacheObjectStoreWrapper,
+    MirroringObjectStoreWrapper,
+};
 use crate::table::NativeTable;
 use crate::utils::validate_table_name;
 
@@ -76,6 +79,8 @@ pub struct ListingDatabaseOptions {
     ///
     /// See available options at <https://docs.lancedb.com/storage/>
     pub storage_options: HashMap<String, String>,
+    /// Local directory used as a write-back cache for object-store databases.
+    pub local_cache_dir: Option<String>,
 }
 
 impl ListingDatabaseOptions {
@@ -111,18 +116,21 @@ impl ListingDatabaseOptions {
                 .transpose()?,
         };
         // We just assume that any options that are not new table config options are storage options
+        let local_cache_dir = map.get(LOCAL_CACHE_DIR_OPTION).cloned();
         let storage_options = map
             .iter()
             .filter(|(key, _)| {
                 key.as_str() != OPT_NEW_TABLE_STORAGE_VERSION
                     && key.as_str() != OPT_NEW_TABLE_V2_MANIFEST_PATHS
                     && key.as_str() != OPT_NEW_TABLE_ENABLE_STABLE_ROW_IDS
+                    && key.as_str() != LOCAL_CACHE_DIR_OPTION
             })
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         Ok(Self {
             new_table_config,
             storage_options,
+            local_cache_dir,
         })
     }
 }
@@ -257,6 +265,8 @@ pub struct ListingDatabase {
     // Session for object stores and caching
     session: Arc<lance::session::Session>,
 
+    local_cache: Option<Arc<LocalCacheObjectStore>>,
+
     // Namespace-backed database for child namespace operations
     namespace_database: Arc<LanceNamespaceDatabase>,
 }
@@ -285,6 +295,12 @@ const MIRRORED_STORE: &str = "mirroredStore";
 
 /// A connection to LanceDB
 impl ListingDatabase {
+    fn local_cache_prefix(cache_dir: &str, url: &url::Url) -> PathBuf {
+        let mut cache_prefix = PathBuf::from(cache_dir);
+        cache_prefix.push(url.host_str().unwrap_or_else(|| url.scheme()));
+        cache_prefix
+    }
+
     pub(crate) fn build_namespace_client_properties(
         uri: &str,
         storage_options: &HashMap<String, String>,
@@ -559,13 +575,44 @@ impl ListingDatabase {
                     })?;
                 }
 
+                let mut local_cache = None;
+                let object_store = if !object_store.is_local() {
+                    if let Some(cache_dir) = options
+                        .local_cache_dir
+                        .as_ref()
+                        .filter(|value| !value.is_empty())
+                    {
+                        let cache_prefix = Self::local_cache_prefix(cache_dir, &url);
+                        std::fs::create_dir_all(&cache_prefix).context(CreateDirSnafu {
+                            path: cache_prefix.to_string_lossy().to_string(),
+                        })?;
+                        let cache_store =
+                            Arc::new(LocalFileSystem::new_with_prefix(&cache_prefix)?);
+                        let cache_store = Arc::new(LocalCacheObjectStore::new(
+                            object_store.clone(),
+                            cache_store,
+                            Some(base_path.clone()),
+                        ));
+                        local_cache = Some(cache_store.clone());
+                        let cached_object_store: Arc<ObjectStore> = cache_store.clone();
+                        cached_object_store
+                    } else {
+                        object_store
+                    }
+                } else {
+                    object_store
+                };
+
                 let write_store_wrapper = match mirrored_store {
                     Some(path) => {
                         let mirrored_store = Arc::new(LocalFileSystem::new_with_prefix(path)?);
                         let wrapper = MirroringObjectStoreWrapper::new(mirrored_store);
                         Some(Arc::new(wrapper) as Arc<dyn WrappingObjectStore>)
                     }
-                    None => None,
+                    None => local_cache.clone().map(|cache| {
+                        Arc::new(LocalCacheObjectStoreWrapper::new(cache))
+                            as Arc<dyn WrappingObjectStore>
+                    }),
                 };
 
                 let namespace_database = Self::connect_namespace_database(
@@ -588,6 +635,7 @@ impl ListingDatabase {
                     storage_options_provider: None,
                     new_table_config: options.new_table_config,
                     session,
+                    local_cache,
                     namespace_database,
                 })
             }
@@ -642,6 +690,7 @@ impl ListingDatabase {
             storage_options_provider: None,
             new_table_config,
             session,
+            local_cache: None,
             namespace_database,
         })
     }
@@ -702,6 +751,41 @@ impl ListingDatabase {
 
     fn namespace_database(&self) -> Arc<LanceNamespaceDatabase> {
         self.namespace_database.clone()
+    }
+
+    pub async fn s3_cache_pull(&self) -> Result<()> {
+        self.local_cache
+            .as_ref()
+            .ok_or_else(|| Error::NotSupported {
+                message: "S3/object-store local cache is not enabled for this connection"
+                    .to_string(),
+            })?
+            .pull()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn s3_cache_commit(&self) -> Result<()> {
+        self.local_cache
+            .as_ref()
+            .ok_or_else(|| Error::NotSupported {
+                message: "S3/object-store local cache is not enabled for this connection"
+                    .to_string(),
+            })?
+            .commit()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub fn s3_cache_close(&self) -> Result<()> {
+        self.local_cache
+            .as_ref()
+            .ok_or_else(|| Error::NotSupported {
+                message: "S3/object-store local cache is not enabled for this connection"
+                    .to_string(),
+            })?
+            .close()
+            .map_err(Into::into)
     }
 
     async fn drop_tables(&self, names: Vec<String>) -> Result<()> {

@@ -76,6 +76,24 @@ from .namespace_utils import (
 class DBConnection(EnforceOverrides):
     """An active LanceDB connection interface."""
 
+    def s3_cache_pull(self) -> None:
+        """Pull remote object-store contents into the local S3 cache."""
+        raise NotImplementedError(
+            "S3/object-store local cache is not supported for this connection type"
+        )
+
+    def s3_cache_commit(self) -> None:
+        """Commit local S3 cache changes to the backing object store."""
+        raise NotImplementedError(
+            "S3/object-store local cache is not supported for this connection type"
+        )
+
+    def s3_cache_close(self) -> None:
+        """Close the local S3 cache for this connection."""
+        raise NotImplementedError(
+            "S3/object-store local cache is not supported for this connection type"
+        )
+
     def list_namespaces(
         self,
         namespace_path: Optional[List[str]] = None,
@@ -682,6 +700,18 @@ class LanceDBConnection(DBConnection):
     def uri(self) -> str:
         return self._conn.uri
 
+    @override
+    def s3_cache_pull(self) -> None:
+        LOOP.run(self._conn.s3_cache_pull())
+
+    @override
+    def s3_cache_commit(self) -> None:
+        LOOP.run(self._conn.s3_cache_commit())
+
+    @override
+    def s3_cache_close(self) -> None:
+        self._conn.s3_cache_close()
+
     @classmethod
     def from_inner(cls, inner: LanceDbConnection):
         return cls(None, _inner=inner)
@@ -1236,6 +1266,18 @@ class AsyncConnection(object):
 
         Any attempt to use the connection after it is closed will result in an error."""
         self._inner.close()
+
+    async def s3_cache_pull(self) -> None:
+        """Pull remote object-store contents into the local S3 cache."""
+        await self._inner.s3_cache_pull()
+
+    async def s3_cache_commit(self) -> None:
+        """Commit local S3 cache changes to the backing object store."""
+        await self._inner.s3_cache_commit()
+
+    def s3_cache_close(self) -> None:
+        """Close the local S3 cache for this connection."""
+        self._inner.s3_cache_close()
 
     @property
     def uri(self) -> str:
